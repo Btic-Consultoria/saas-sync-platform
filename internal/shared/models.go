@@ -13,6 +13,7 @@ type AgentConfig struct {
 	Tickelia     *TickeliaConfig  `json:"Tickelia,omitempty" mapstructure:"tickelia"`
 	Companies    []CompanyMapping `json:"Empresas" mapstructure:"companies"`
 	SyncSettings SyncSettings     `json:"SyncSettings,omitempty" mapstructure:"saas"`
+	SaaSConfig   SaaSConnection    `json:"SaaS,omitempty" mapstructure:"saas"`
 }
 
 // DatabaseConfig contains Sage 200c database connection details.
