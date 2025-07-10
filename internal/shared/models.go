@@ -11,7 +11,7 @@ type AgentConfig struct {
 	Database     DatabaseConfig   `json:"DB" mapstructure:"database"`
 	Bitrix24     *Bitrix24Config  `json:"Bitrix24,omitempty" mapstructure:"bitrix24"`
 	Tickelia     *TickeliaConfig  `json:"Tickelia,omitempty" mapstructure:"tickelia"`
-	Companies    []CompanyMapping `json:"Empresas", mapstructure:"companies"`
+	Companies    []CompanyMapping `json:"Empresas" mapstructure:"companies"`
 	SyncSettings SyncSettings     `json:"SyncSettings,omitempty" mapstructure:"saas"`
 }
 
