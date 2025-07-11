@@ -1,29 +1,35 @@
+// agent/sage/connector.go
 package sage
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"saas-sync-platform/internal/shared"
+	"log"
 	"time"
+
+	"saas-sync-platform/internal/shared"
 )
 
-// Connector handles connections to Sage 200c database.
+// Connector handles connections to Sage 200c database
 type Connector struct {
 	db     *sql.DB
 	config *shared.DatabaseConfig
 }
 
-// NewConnector creates a new Sage database connector.
+// NewConnector creates a new Sage database connector
 func NewConnector(config *shared.DatabaseConfig) *Connector {
 	return &Connector{
 		config: config,
 	}
 }
 
-// Connect establishes connection to Sage database.
+// Connect establishes connection to Sage database
 func (c *Connector) Connect() error {
 	connStr := c.config.GetSageConnectionString()
+
+	log.Printf("Connecting to Sage database: %s:%s/%s",
+		c.config.Host, c.config.Port, c.config.Database)
 
 	var err error
 	c.db, err = sql.Open("sqlserver", connStr)
@@ -31,7 +37,7 @@ func (c *Connector) Connect() error {
 		return fmt.Errorf("failed to open database connection: %w", err)
 	}
 
-	// Test the connection.
+	// Test the connection
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -40,10 +46,11 @@ func (c *Connector) Connect() error {
 		return fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	log.Println("Successfully connected to Sage database")
 	return nil
 }
 
-// Cl.ose closes the database connection
+// Close closes the database connection
 func (c *Connector) Close() error {
 	if c.db != nil {
 		return c.db.Close()
@@ -51,24 +58,20 @@ func (c *Connector) Close() error {
 	return nil
 }
 
-// GetCustomers retrieves customers from Sage database
-func (c *Connector) GetCustomers(lastSync time.Time) ([]shared.Customer, error) {
+// GetRecentCustomers retrieves customers modified since lastSync
+func (c *Connector) GetRecentCustomers(lastSync time.Time) ([]shared.Customer, error) {
 	query := `
-		SELECT 
+        SELECT TOP 100
             CustomerAccountNumber,
             CustomerName,
             TelephoneNumber,
+            FaxNumber,
             EmailAddress,
-            MainAddress.Address1,
-            MainAddress.City,
-            MainAddress.PostCode,
-            MainAddress.Country,
             DateTimeModified
-        FROM SLCustomers c
-        LEFT JOIN PLPostalAddresses MainAddress ON c.MainAddressID = MainAddress.PostalAddressID
-        WHERE c.DateTimeModified > ?
-        ORDER BY c.DateTimeModified
-	`
+        FROM SLCustomers 
+        WHERE DateTimeModified > ?
+        ORDER BY DateTimeModified DESC
+    `
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -82,31 +85,24 @@ func (c *Connector) GetCustomers(lastSync time.Time) ([]shared.Customer, error) 
 	var customers []shared.Customer
 	for rows.Next() {
 		var customer shared.Customer
-		var phone, email, address, city, postalCode, country sql.NullString
+		var phone, fax, email sql.NullString
 
 		err := rows.Scan(
 			&customer.Code,
 			&customer.Name,
 			&phone,
+			&fax,
 			&email,
-			&address,
-			&city,
-			&postalCode,
-			&country,
 			&customer.ModifiedDate,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan customer row: %w", err)
 		}
 
-		// Handle nullable fields.
+		// Set ID and handle nullable fields
+		customer.ID = customer.Code
 		customer.Phone = phone.String
 		customer.Email = email.String
-		customer.Address = address.String
-		customer.City = city.String
-		customer.PostalCode = postalCode.String
-		customer.Country = country.String
-		customer.ID = customer.Code // Customer code as ID
 
 		customers = append(customers, customer)
 	}
@@ -115,174 +111,141 @@ func (c *Connector) GetCustomers(lastSync time.Time) ([]shared.Customer, error) 
 		return nil, fmt.Errorf("error iterating customer rows: %w", err)
 	}
 
+	log.Printf("Found %d customers modified since %v", len(customers), lastSync)
 	return customers, nil
 }
 
-// GetInvoices retrieves invoices from Sage database
-func (c *Connector) GetInvoices(lastSync time.Time) ([]shared.Invoice, error) {
+// GetCustomerDetails retrieves detailed customer information including addresses
+func (c *Connector) GetCustomerDetails(customerCode string) (*shared.Customer, error) {
 	query := `
         SELECT 
-            i.InvoiceNumber,
-            i.CustomerAccountNumber,
-            i.DocumentSubTotal,
-            i.DocumentTaxValue,
-            i.DocumentTotalValue,
-            i.DocumentDate,
-            i.DueDate,
-            i.InvoiceStatusID,
-            i.DateTimeModified
-        FROM SLInvoices i
-        WHERE i.DateTimeModified > ?
-        ORDER BY i.DateTimeModified
+            c.CustomerAccountNumber,
+            c.CustomerName,
+            c.TelephoneNumber,
+            c.FaxNumber,
+            c.EmailAddress,
+            c.WebSiteURL,
+            addr.Address1,
+            addr.Address2,
+            addr.City,
+            addr.PostCode,
+            addr.Country,
+            c.DateTimeModified
+        FROM SLCustomers c
+        LEFT JOIN PLPostalAddresses addr ON c.MainAddressID = addr.PostalAddressID
+        WHERE c.CustomerAccountNumber = ?
     `
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	rows, err := c.db.QueryContext(ctx, query, lastSync)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query invoices: %w", err)
-	}
-	defer rows.Close()
-
-	var invoices []shared.Invoice
-	for rows.Next() {
-		var invoice shared.Invoice
-		var statusID int
-
-		err := rows.Scan(
-			&invoice.Number,
-			&invoice.CustomerID,
-			&invoice.Amount,
-			&invoice.TaxAmount,
-			&invoice.TotalAmount,
-			&invoice.Date,
-			&invoice.DueDate,
-			&statusID,
-			&invoice.ModifiedDate,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan invoice row: %w", err)
-		}
-
-		invoice.ID = invoice.Number
-		invoice.Status = c.getInvoiceStatus(statusID)
-
-		invoices = append(invoices, invoice)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating invoice rows: %w", err)
-	}
-
-	return invoices, nil
-}
-
-// GetProducts retrieves products from Sage database
-func (c *Connector) GetProducts(lastSync time.Time) ([]shared.Product, error) {
-	query := `
-        SELECT 
-            ProductCode,
-            ProductName,
-            ProductDescription,
-            UnitSellingPrice,
-            ProductGroupName,
-            DateTimeModified
-        FROM StockItems s
-        LEFT JOIN StockItemGroups g ON s.StockItemGroupID = g.StockItemGroupID
-        WHERE s.DateTimeModified > ?
-        ORDER BY s.DateTimeModified
-    `
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	rows, err := c.db.QueryContext(ctx, query, lastSync)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query products: %w", err)
-	}
-	defer rows.Close()
-
-	var products []shared.Product
-	for rows.Next() {
-		var product shared.Product
-		var description, category sql.NullString
-
-		err := rows.Scan(
-			&product.Code,
-			&product.Name,
-			&description,
-			&product.Price,
-			&category,
-			&product.ModifiedDate,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan product row: %w", err)
-		}
-
-		product.ID = product.Code
-		product.Description = description.String
-		product.Category = category.String
-
-		products = append(products, product)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating product rows: %w", err)
-	}
-
-	return products, nil
-}
-
-// TestConnection performs a simple test query to verify database connectivity.
-func (c *Connector) TestConnection() error {
-	query := "SELECT TOP 1 CustomerAccountNumber FROM SLCustomers"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var customerCode string
-	err := c.db.QueryRowContext(ctx, query).Scan(&customerCode)
+	var customer shared.Customer
+	var phone, fax, email, website, address1, address2, city, postalCode, country sql.NullString
+
+	err := c.db.QueryRowContext(ctx, query, customerCode).Scan(
+		&customer.Code,
+		&customer.Name,
+		&phone,
+		&fax,
+		&email,
+		&website,
+		&address1,
+		&address2,
+		&city,
+		&postalCode,
+		&country,
+		&customer.ModifiedDate,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("customer %s not found", customerCode)
+		}
+		return nil, fmt.Errorf("failed to query customer details: %w", err)
+	}
+
+	// Set fields
+	customer.ID = customer.Code
+	customer.Phone = phone.String
+	customer.Email = email.String
+	customer.Address = address1.String
+	if address2.String != "" {
+		customer.Address += ", " + address2.String
+	}
+	customer.City = city.String
+	customer.PostalCode = postalCode.String
+	customer.Country = country.String
+
+	return &customer, nil
+}
+
+// TestConnection performs a simple test to verify database connectivity
+func (c *Connector) TestConnection() error {
+	query := "SELECT TOP 1 CustomerAccountNumber, CustomerName FROM SLCustomers"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var customerCode, customerName string
+	err := c.db.QueryRowContext(ctx, query).Scan(&customerCode, &customerName)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("test query failed: %w", err)
+	}
+
+	if err != sql.ErrNoRows {
+		log.Printf("Database test successful - found customer: %s (%s)", customerCode, customerName)
+	} else {
+		log.Println("Database test successful - no customers found but connection works")
 	}
 
 	return nil
 }
 
-// GetLastSyncTime retrieves the last successful sync time for a given sync type.
-func (c *Connector) GetLastSyncTime(syncType string) (time.Time, error) {
-	// This would typically be stored in a sync log table in the database
-	// or retrieved from the SaaS platform
+// GetCustomerCount returns the total number of customers in the database
+func (c *Connector) GetCustomerCount() (int, error) {
+	query := "SELECT COUNT(*) FROM SLCustomers"
 
-	// For now, return a default time (e. g. last 24 hours).
-	return time.Now().AddDate(0, 0, -1), nil
-}
-
-// getInvoiceStatus converts Sage invoice status ID to readable status
-func (c *Connector) getInvoiceStatus(statusID int) string {
-	switch statusID {
-	case 1:
-		return "Draft"
-	case 2:
-		return "Pending"
-	case 3:
-		return "Sent"
-	case 4:
-		return "Paid"
-	case 5:
-		return "Overdue"
-	case 6:
-		return "Cancelled"
-	default:
-		return "Unknown"
-	}
-}
-
-// ExecuteCustomQuery allows executing custom SQL queries for specific sync requirements.
-func (c *Connector) ExecuteCustomQuery(query string, args ...interface{}) (*sql.Rows, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	return c.db.QueryContext(ctx, query, args...)
+	var count int
+	err := c.db.QueryRowContext(ctx, query).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count customers: %w", err)
+	}
+
+	return count, nil
+}
+
+// GetDatabaseInfo returns basic information about the Sage database
+func (c *Connector) GetDatabaseInfo() (map[string]interface{}, error) {
+	info := make(map[string]interface{})
+
+	// Get customer count
+	customerCount, err := c.GetCustomerCount()
+	if err != nil {
+		return nil, err
+	}
+	info["customer_count"] = customerCount
+
+	// Get database version info
+	query := "SELECT @@VERSION"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var version string
+	err = c.db.QueryRowContext(ctx, query).Scan(&version)
+	if err != nil {
+		log.Printf("Could not get database version: %v", err)
+		info["database_version"] = "Unknown"
+	} else {
+		info["database_version"] = version
+	}
+
+	// Get current database name
+	info["database_name"] = c.config.Database
+	info["host"] = c.config.Host
+	info["port"] = c.config.Port
+
+	return info, nil
 }

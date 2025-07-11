@@ -1,13 +1,14 @@
+// cmd/tray-agent/main.go
 package main
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
+	"saas-sync-platform/agent/bitrix24"
+	"saas-sync-platform/agent/sage"
 	"saas-sync-platform/internal/shared"
 
 	_ "github.com/denisenkom/go-mssqldb"
@@ -15,11 +16,12 @@ import (
 )
 
 type TrayAgent struct {
-	config       *shared.AgentConfig
-	configLoader *shared.ConfigLoader
-	sageDB       *sql.DB
-	isRunning    bool
-	lastSync     time.Time
+	config         *shared.AgentConfig
+	configLoader   *shared.ConfigLoader
+	sageConnector  *sage.Connector
+	bitrix24Client *bitrix24.Client
+	isRunning      bool
+	lastSync       time.Time
 
 	// Menu items
 	mStatus *systray.MenuItem
@@ -62,7 +64,7 @@ func onExit() {
 }
 
 func (a *TrayAgent) initSystemTray() {
-	// Set the icon and tooltip
+	// Set the title and tooltip (no icon for now)
 	systray.SetTitle("Sage Sync")
 	systray.SetTooltip("Sage 200c Synchronization Agent")
 
@@ -155,11 +157,23 @@ func (a *TrayAgent) startSync() {
 	log.Println("Starting sync operation...")
 	a.updateStatus("Starting...")
 
-	// Connect to Sage database
-	if err := a.connectToSage(); err != nil {
+	// Initialize Sage connector
+	a.sageConnector = sage.NewConnector(&a.config.Database)
+	if err := a.sageConnector.Connect(); err != nil {
 		a.showError("Failed to connect to Sage database: " + err.Error())
-		a.updateStatus("Connection failed - Check configuration")
+		a.updateStatus("Sage connection failed")
 		return
+	}
+
+	// Initialize Bitrix24 client
+	if a.config.Bitrix24 != nil {
+		a.bitrix24Client = bitrix24.NewClient(a.config.Bitrix24)
+		if err := a.bitrix24Client.TestConnection(); err != nil {
+			a.showError("Failed to connect to Bitrix24: " + err.Error())
+			a.updateStatus("Bitrix24 connection failed")
+			a.sageConnector.Close()
+			return
+		}
 	}
 
 	a.isRunning = true
@@ -188,39 +202,109 @@ func (a *TrayAgent) stopSync() {
 	a.mStop.Disable()
 	a.updateStatus("Stopped")
 
-	// Close database connection
-	if a.sageDB != nil {
-		a.sageDB.Close()
-		a.sageDB = nil
+	// Close connections
+	if a.sageConnector != nil {
+		a.sageConnector.Close()
+		a.sageConnector = nil
 	}
+
+	a.bitrix24Client = nil
 
 	log.Println("Sync stopped successfully")
 }
 
-func (a *TrayAgent) connectToSage() error {
-	connStr := a.config.Database.GetSageConnectionString()
+func (a *TrayAgent) openLogs() {
+	log.Println("Opening logs...")
+	// TODO: Open log file in default text editor
+	// exec.Command("notepad", "path/to/logfile.log").Start()
+}
 
-	log.Printf("Connecting to Sage database: %s:%s/%s",
-		a.config.Database.Host, a.config.Database.Port, a.config.Database.Database)
+func (a *TrayAgent) updateStatus(status string) {
+	a.mStatus.SetTitle("Status: " + status)
+	systray.SetTooltip("Sage Sync Agent - " + status)
+}
 
-	var err error
-	a.sageDB, err = sql.Open("sqlserver", connStr)
+func (a *TrayAgent) showError(message string) {
+	log.Printf("ERROR: %s", message)
+	// TODO: Show Windows notification or dialog in the future
+}
+
+func (a *TrayAgent) showConfiguration() {
+	log.Println("=== Current Configuration ===")
+	log.Printf("Client Code: %s", a.config.ClientCode)
+	log.Printf("Database: %s:%s/%s", a.config.Database.Host, a.config.Database.Port, a.config.Database.Database)
+	log.Printf("Sync Interval: %d minutes", a.config.SyncSettings.IntervalMinutes)
+
+	if a.config.Bitrix24 != nil {
+		log.Printf("Bitrix24: %s", a.config.Bitrix24.APITenant)
+		log.Printf("Pack Empresa: %t", a.config.Bitrix24.PackEmpresa)
+	} else {
+		log.Println("Bitrix24: Not configured")
+	}
+
+	log.Printf("Companies: %d configured", len(a.config.Companies))
+	for i, company := range a.config.Companies {
+		log.Printf("  %d. Bitrix: %s -> Sage: %s", i+1, company.BitrixCompany, company.SageCompany)
+	}
+
+	// Show database info if connected
+	if a.sageConnector != nil {
+		if info, err := a.sageConnector.GetDatabaseInfo(); err == nil {
+			log.Printf("Database Info:")
+			for key, value := range info {
+				log.Printf("  %s: %v", key, value)
+			}
+		}
+	}
+}
+
+func (a *TrayAgent) performSync() {
+	a.updateStatus("Syncing...")
+	a.lastSync = time.Now()
+
+	log.Println("Starting sync operation...")
+
+	// Test Sage connection first
+	if err := a.sageConnector.TestConnection(); err != nil {
+		a.showError("Sage connection test failed: " + err.Error())
+		a.updateStatus("Sync failed - Sage connection")
+		return
+	}
+
+	// Get recent customers from Sage (last 24 hours if no previous sync)
+	since := a.lastSync.Add(-24 * time.Hour)
+	if !a.lastSync.IsZero() {
+		since = a.lastSync.Add(-time.Duration(a.config.SyncSettings.IntervalMinutes) * time.Minute)
+	}
+
+	customers, err := a.sageConnector.GetRecentCustomers(since)
 	if err != nil {
-		return fmt.Errorf("failed to open database connection: %w", err)
+		a.showError("Failed to read Sage customers: " + err.Error())
+		a.updateStatus("Sync failed - Sage data")
+		return
 	}
 
-	// Test the connection with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	log.Printf("Found %d customers to sync", len(customers))
 
-	if err := a.sageDB.PingContext(ctx); err != nil {
-		a.sageDB.Close()
-		a.sageDB = nil
-		return fmt.Errorf("failed to connect to database: %w", err)
+	// Sync to Bitrix24 if configured
+	if a.bitrix24Client != nil {
+		a.updateStatus(fmt.Sprintf("Syncing %d customers to Bitrix24...", len(customers)))
+
+		if err := a.bitrix24Client.SyncCustomers(customers); err != nil {
+			a.showError("Bitrix24 sync failed: " + err.Error())
+			a.updateStatus("Sync failed - Bitrix24")
+			return
+		}
+
+		log.Printf("Successfully synced %d customers to Bitrix24", len(customers))
 	}
 
-	log.Println("Successfully connected to Sage database")
-	return nil
+	// Update status with results
+	status := fmt.Sprintf("Last sync: %s (%d customers)",
+		a.lastSync.Format("15:04:05"), len(customers))
+	a.updateStatus(status)
+
+	log.Printf("Sync completed successfully: %d customers processed", len(customers))
 }
 
 func (a *TrayAgent) syncLoop() {
@@ -245,85 +329,4 @@ func (a *TrayAgent) syncLoop() {
 			}
 		}
 	}
-}
-
-func (a *TrayAgent) performSync() {
-	a.updateStatus("Syncing...")
-	a.lastSync = time.Now()
-
-	log.Println("Starting sync operation...")
-
-	// Test database connection
-	if err := a.testSageConnection(); err != nil {
-		a.showError("Sync failed: " + err.Error())
-		a.updateStatus("Sync failed - Will retry")
-		return
-	}
-
-	// TODO: Add actual sync logic here:
-	// 1. Fetch sync tasks from SaaS platform
-	// 2. Read data from Sage database
-	// 3. Send data to external services (Bitrix24, etc.)
-	// 4. Update sync status
-
-	log.Println("Sync completed successfully")
-
-	status := fmt.Sprintf("Last sync: %s", a.lastSync.Format("15:04:05"))
-	a.updateStatus(status)
-}
-
-func (a *TrayAgent) testSageConnection() error {
-	// Simple test query to verify connection
-	query := `SELECT TOP 1 CustomerAccountNumber, CustomerName FROM SLCustomers`
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var customerCode, customerName string
-	err := a.sageDB.QueryRowContext(ctx, query).Scan(&customerCode, &customerName)
-	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("database test query failed: %w", err)
-	}
-
-	if err != sql.ErrNoRows {
-		log.Printf("Database test successful - found customer: %s (%s)", customerCode, customerName)
-	} else {
-		log.Println("Database test successful - no customers found but connection works")
-	}
-
-	return nil
-}
-
-func (a *TrayAgent) updateStatus(status string) {
-	a.mStatus.SetTitle("Status: " + status)
-	systray.SetTooltip("Sage Sync Agent - " + status)
-}
-
-func (a *TrayAgent) showError(message string) {
-	log.Printf("ERROR: %s", message)
-	// TODO: Show Windows notification or dialog
-}
-
-func (a *TrayAgent) showConfiguration() {
-	log.Println("=== Current Configuration ===")
-	log.Printf("Client Code: %s", a.config.ClientCode)
-	log.Printf("Database: %s:%s/%s", a.config.Database.Host, a.config.Database.Port, a.config.Database.Database)
-	log.Printf("Sync Interval: %d minutes", a.config.SyncSettings.IntervalMinutes)
-
-	if a.config.Bitrix24 != nil {
-		log.Printf("Bitrix24: %s", a.config.Bitrix24.APITenant)
-	}
-
-	log.Printf("Companies: %d configured", len(a.config.Companies))
-	for i, company := range a.config.Companies {
-		log.Printf("  %d. Bitrix: %s -> Sage: %s", i+1, company.BitrixCompany, company.SageCompany)
-	}
-
-	// TODO: Open configuration dialog or web interface
-}
-
-func (a *TrayAgent) openLogs() {
-	log.Println("Opening logs...")
-	// TODO: Open log file in default text editor
-	// exec.Command("notepad", "path/to/logfile.log").Start()
 }
