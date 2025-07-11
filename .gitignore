@@ -611,3 +611,6 @@ FodyWeavers.xsd
 
 ### LLMs ###
 CLAUDE.md
+
+### Other important files ###
+configs/*json

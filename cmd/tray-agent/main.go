@@ -104,7 +104,7 @@ func (a *TrayAgent) handleMenuClicks() {
 	}
 }
 
-func (a *TrayAgent) LoadConfiguration() error {
+func (a *TrayAgent) loadConfiguration() error {
 	// Check if we're in development mode
 	isDev := os.Getenv("ENV") == "development"
 
