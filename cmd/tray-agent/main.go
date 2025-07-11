@@ -20,6 +20,7 @@ type TrayAgent struct {
 	sageDB       *sql.DB
 	isRunning    bool
 	lastSync     time.Time
+
 	// Menu items
 	mStatus *systray.MenuItem
 	mStart  *systray.MenuItem
@@ -30,12 +31,16 @@ type TrayAgent struct {
 }
 
 func main() {
-	// Run the system tray appliction
+	log.Println("Starting Sage Sync Agent...")
+
+	// Run the system tray application
 	systray.Run(onReady, onExit)
 }
 
 func onReady() {
 	agent := &TrayAgent{}
+
+	log.Println("Initializing tray agent...")
 
 	// Initialize system tray UI
 	agent.initSystemTray()
@@ -43,11 +48,13 @@ func onReady() {
 	// Load configuration
 	if err := agent.loadConfiguration(); err != nil {
 		agent.showError("Failed to load configuration: " + err.Error())
+		agent.updateStatus("Configuration Error")
 		return
 	}
 
-	// Start the agent
-	agent.run()
+	// Agent is ready
+	agent.updateStatus("Ready - Click 'Start Sync' to begin")
+	log.Printf("Sage Sync Agent ready for client: %s", agent.config.ClientCode)
 }
 
 func onExit() {
@@ -55,7 +62,7 @@ func onExit() {
 }
 
 func (a *TrayAgent) initSystemTray() {
-	// Set the icon and tooltip.
+	// Set the icon and tooltip
 	systray.SetTitle("Sage Sync")
 	systray.SetTooltip("Sage 200c Synchronization Agent")
 
@@ -65,18 +72,18 @@ func (a *TrayAgent) initSystemTray() {
 
 	systray.AddSeparator()
 
-	a.mStart = systray.AddMenuItem("Start Sync", "Start synchronization")
-	a.mStop = systray.AddMenuItem("Stop Sync", "Stop synchronization")
+	a.mStart = systray.AddMenuItem("🔄 Start Sync", "Start synchronization")
+	a.mStop = systray.AddMenuItem("⏹️ Stop Sync", "Stop synchronization")
 	a.mStop.Disable()
 
 	systray.AddSeparator()
 
-	a.mConfig = systray.AddMenuItem("Configuration", "Open configuration")
-	a.mLogs = systray.AddMenuItem("View Logs", "Open log file")
+	a.mConfig = systray.AddMenuItem("⚙️ Configuration", "View configuration details")
+	a.mLogs = systray.AddMenuItem("📋 View Logs", "Open log file")
 
 	systray.AddSeparator()
 
-	a.mQuit = systray.AddMenuItem("Exit", "Exit the application")
+	a.mQuit = systray.AddMenuItem("❌ Exit", "Exit the application")
 
 	// Handle menu clicks
 	go a.handleMenuClicks()
@@ -92,12 +99,15 @@ func (a *TrayAgent) handleMenuClicks() {
 			a.stopSync()
 
 		case <-a.mConfig.ClickedCh:
-			a.openConfiguration()
+			a.showConfiguration()
 
 		case <-a.mLogs.ClickedCh:
 			a.openLogs()
 
 		case <-a.mQuit.ClickedCh:
+			if a.isRunning {
+				a.stopSync()
+			}
 			systray.Quit()
 			return
 		}
@@ -105,20 +115,22 @@ func (a *TrayAgent) handleMenuClicks() {
 }
 
 func (a *TrayAgent) loadConfiguration() error {
-	// Check if we're in development mode
+	// Determine if we're in development mode
 	isDev := os.Getenv("ENV") == "development"
 
 	var configPath, envPath string
 	if isDev {
-		configPath, envPath = shared.GetDefaultConfigPaths()
+		configPath, envPath = shared.GetDevelopmentConfigPaths()
 		log.Println("Development mode: using local config files")
 	} else {
 		configPath, envPath = shared.GetDefaultConfigPaths()
 		log.Println("Production mode: using user config files")
 	}
 
+	// Create config loader
 	a.configLoader = shared.NewConfigLoader(configPath, envPath)
 
+	// Load configuration
 	config, err := a.configLoader.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
@@ -135,19 +147,15 @@ func (a *TrayAgent) loadConfiguration() error {
 	return nil
 }
 
-func (a *TrayAgent) run() {
-	a.updateStatus("Ready - Click 'Start Sync' to begin")
-	log.Println("Sage Sync Agent is ready")
-}
-
 func (a *TrayAgent) startSync() {
 	if a.isRunning {
 		return
 	}
 
+	log.Println("Starting sync operation...")
 	a.updateStatus("Starting...")
 
-	// Connect to Sage database.
+	// Connect to Sage database
 	if err := a.connectToSage(); err != nil {
 		a.showError("Failed to connect to Sage database: " + err.Error())
 		a.updateStatus("Connection failed - Check configuration")
@@ -158,11 +166,11 @@ func (a *TrayAgent) startSync() {
 	a.mStart.Disable()
 	a.mStop.Enable()
 
-	// Update status.
+	// Update status
 	interval := a.config.SyncSettings.IntervalMinutes
 	a.updateStatus(fmt.Sprintf("Connected - Syncing every %d minutes", interval))
 
-	log.Printf("Starting sync with interval: %d minutes", interval)
+	log.Printf("Sync started with %d minute interval", interval)
 
 	// Start sync loop
 	go a.syncLoop()
@@ -173,22 +181,27 @@ func (a *TrayAgent) stopSync() {
 		return
 	}
 
+	log.Println("Stopping sync operation...")
+
 	a.isRunning = false
 	a.mStart.Enable()
 	a.mStop.Disable()
 	a.updateStatus("Stopped")
 
+	// Close database connection
 	if a.sageDB != nil {
 		a.sageDB.Close()
 		a.sageDB = nil
 	}
 
-	log.Println("Sync stopped")
+	log.Println("Sync stopped successfully")
 }
 
 func (a *TrayAgent) connectToSage() error {
 	connStr := a.config.Database.GetSageConnectionString()
-	log.Printf("Connecting to Sage database: %s", fmt.Sprintf("server=%s;database=%s", a.config.Database.Host, a.config.Database.Database))
+
+	log.Printf("Connecting to Sage database: %s:%s/%s",
+		a.config.Database.Host, a.config.Database.Port, a.config.Database.Database)
 
 	var err error
 	a.sageDB, err = sql.Open("sqlserver", connStr)
@@ -196,14 +209,14 @@ func (a *TrayAgent) connectToSage() error {
 		return fmt.Errorf("failed to open database connection: %w", err)
 	}
 
-	// Test the connection
+	// Test the connection with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := a.sageDB.PingContext(ctx); err != nil {
 		a.sageDB.Close()
 		a.sageDB = nil
-		return fmt.Errorf("failed to ping database: %w", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 
 	log.Println("Successfully connected to Sage database")
@@ -218,6 +231,7 @@ func (a *TrayAgent) syncLoop() {
 	// Perform initial sync
 	a.performSync()
 
+	// Continue syncing until stopped
 	for a.isRunning {
 		select {
 		case <-ticker.C:
@@ -225,7 +239,7 @@ func (a *TrayAgent) syncLoop() {
 				a.performSync()
 			}
 		case <-time.After(1 * time.Second):
-			// Check if we should stop
+			// Check if we should stop (allows quick exit)
 			if !a.isRunning {
 				return
 			}
@@ -237,22 +251,21 @@ func (a *TrayAgent) performSync() {
 	a.updateStatus("Syncing...")
 	a.lastSync = time.Now()
 
-	log.Println("Starting sync operation")
+	log.Println("Starting sync operation...")
 
-	// For now, let's just test the database connection and read some data
+	// Test database connection
 	if err := a.testSageConnection(); err != nil {
 		a.showError("Sync failed: " + err.Error())
 		a.updateStatus("Sync failed - Will retry")
 		return
 	}
 
-	// Here we would:
+	// TODO: Add actual sync logic here:
 	// 1. Fetch sync tasks from SaaS platform
 	// 2. Read data from Sage database
-	// 3. Send data to SaaS platform
+	// 3. Send data to external services (Bitrix24, etc.)
 	// 4. Update sync status
 
-	// For now, just log success.
 	log.Println("Sync completed successfully")
 
 	status := fmt.Sprintf("Last sync: %s", a.lastSync.Format("15:04:05"))
@@ -260,43 +273,24 @@ func (a *TrayAgent) performSync() {
 }
 
 func (a *TrayAgent) testSageConnection() error {
-	// Test query to verify connection and read some data
-	query := `
-	SELECT TOP 5
-		CustomerID,
-		CustomerName,
-	ModifiedDate,
-	FROM SLCustomers
-	ORDER BY ModifiedDate DESC
-	`
+	// Simple test query to verify connection
+	query := `SELECT TOP 1 CustomerAccountNumber, CustomerName FROM SLCustomers`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	rows, err := a.sageDB.QueryContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("query failed: %w", err)
-	}
-	defer rows.Close()
-
-	count := 0
-	for rows.Next() {
-		var customerId, customerName string
-		var modifiedDate time.Time
-
-		if err := rows.Scan(&customerId, &customerName, &modifiedDate); err != nil {
-			return fmt.Errorf("scan failed: %w", err)
-		}
-
-		log.Printf("Customer: %s - %s (Modified: %s)", customerId, customerName, modifiedDate.Format("2006-01-02"))
-		count++
+	var customerCode, customerName string
+	err := a.sageDB.QueryRowContext(ctx, query).Scan(&customerCode, &customerName)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("database test query failed: %w", err)
 	}
 
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error: %w", err)
+	if err != sql.ErrNoRows {
+		log.Printf("Database test successful - found customer: %s (%s)", customerCode, customerName)
+	} else {
+		log.Println("Database test successful - no customers found but connection works")
 	}
 
-	log.Printf("Successfully read %d customers from Sage", count)
 	return nil
 }
 
@@ -307,19 +301,29 @@ func (a *TrayAgent) updateStatus(status string) {
 
 func (a *TrayAgent) showError(message string) {
 	log.Printf("ERROR: %s", message)
-	// In a real implementation, we might show a Windows notification
-	// or write to a visible log file.
+	// TODO: Show Windows notification or dialog
 }
 
-func (a *TrayAgent) openConfiguration() {
-	log.Println("Opening configuration...")
-	// This could:
-	// 1. Open the config file in notepad
-	// 2. Open a simple config dialog
-	// 3. Open your Saas web interface for configuration.
+func (a *TrayAgent) showConfiguration() {
+	log.Println("=== Current Configuration ===")
+	log.Printf("Client Code: %s", a.config.ClientCode)
+	log.Printf("Database: %s:%s/%s", a.config.Database.Host, a.config.Database.Port, a.config.Database.Database)
+	log.Printf("Sync Interval: %d minutes", a.config.SyncSettings.IntervalMinutes)
+
+	if a.config.Bitrix24 != nil {
+		log.Printf("Bitrix24: %s", a.config.Bitrix24.APITenant)
+	}
+
+	log.Printf("Companies: %d configured", len(a.config.Companies))
+	for i, company := range a.config.Companies {
+		log.Printf("  %d. Bitrix: %s -> Sage: %s", i+1, company.BitrixCompany, company.SageCompany)
+	}
+
+	// TODO: Open configuration dialog or web interface
 }
 
 func (a *TrayAgent) openLogs() {
 	log.Println("Opening logs...")
-	// Open the log file in notepad or default text editor.
+	// TODO: Open log file in default text editor
+	// exec.Command("notepad", "path/to/logfile.log").Start()
 }

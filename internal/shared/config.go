@@ -219,7 +219,7 @@ func ValidateConfig(config *AgentConfig) error {
 	}
 
 	if len(config.Companies) == 0 {
-		return fmt.Errorf("ar least one company mapping is required")
+		return fmt.Errorf("at least one company mapping is required")
 	}
 
 	return nil

@@ -43,7 +43,7 @@ type TickeliaConfig struct {
 // CompanyMapping maps Sage companies to external service companies.
 type CompanyMapping struct {
 	BitrixCompany string `json:"EmpresaBitrix" mapstructure:"bitrix_company"`
-	SageCompany   string `json:"EmpresaSage" mapstructuree:"sage_company"`
+	SageCompany   string `json:"EmpresaSage" mapstructure:"sage_company"`
 }
 
 // SyncSettings contains synchronization preferences.
