@@ -608,3 +608,9 @@ FodyWeavers.xsd
 
 ### VisualStudio Patch ###
 # Additional files built by Visual Studio
+
+### LLMs ###
+CLAUDE.md
+
+### Other important files ###
+configs/*json
