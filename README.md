@@ -389,9 +389,9 @@ All rights reserved. Unauthorized copying or distribution is prohibited.
 
 ## 👥 Team
 
-- **Project Lead**: Arnau Forcada & Jordi Ardura
+- **Project Lead**: Jordi Ardura
 - **Backend Developer**: Jordi Ardura
-- **Frontend Developer**: Rafa Bermúdez
+- **Frontend Developer**: Jordi Ardura
 - **DevOps Engineer**: Jordi Ardura
 
 ---
